@@ -7,6 +7,7 @@ import (
 
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
+	pkgApi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
 	api "k8s.io/kubernetes/pkg/api/v1"
 	kubernetes "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_5"
@@ -28,7 +29,7 @@ func resourceKubernetesPersistentVolumeClaim() *schema.Resource {
 			"spec": {
 				Type:        schema.TypeList,
 				Description: "Spec defines the desired characteristics of a volume requested by a pod author. More info: http://kubernetes.io/docs/user-guide/persistent-volumes#persistentvolumeclaims",
-				Optional:    true,
+				Required:    true,
 				MaxItems:    1,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
@@ -192,26 +193,30 @@ func resourceKubernetesPersistentVolumeClaimRead(d *schema.ResourceData, meta in
 
 func resourceKubernetesPersistentVolumeClaimUpdate(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*kubernetes.Clientset)
-
-	metadata := expandMetadata(d.Get("metadata").([]interface{}))
-
-	spec := expandPersistentVolumeClaimSpec(d.Get("spec").([]interface{}))
-
 	namespace, name := idParts(d.Id())
-	// TODO: Explain
-	metadata.Name = name
 
-	volume := api.PersistentVolumeClaim{
-		ObjectMeta: metadata,
-		Spec:       spec,
+	ops := patchMetadata("metadata.0.", "/metadata/", d)
+	if d.HasChange("spec") {
+		spec := expandPersistentVolumeClaimSpec(d.Get("spec").([]interface{}))
+		// if err != nil {
+		// 	return err
+		// }
+		ops = append(ops, &ReplaceOperation{
+			Path:  "/spec",
+			Value: spec,
+		})
 	}
-	log.Printf("[INFO] Updating persistent volume claim: %#v", volume)
-	out, err := conn.CoreV1().PersistentVolumeClaims(namespace).Update(&volume)
+	data, err := ops.MarshalJSON()
+	if err != nil {
+		return fmt.Errorf("Failed to marshal update operations: %s", err)
+	}
+
+	log.Printf("[INFO] Updating persistent volume claim: %s", ops)
+	out, err := conn.CoreV1().PersistentVolumeClaims(namespace).Patch(name, pkgApi.JSONPatchType, data)
 	if err != nil {
 		return err
 	}
 	log.Printf("[INFO] Submitted updated persistent volume claim: %#v", out)
-	d.SetId(out.Name)
 
 	return resourceKubernetesPersistentVolumeClaimRead(d, meta)
 }
